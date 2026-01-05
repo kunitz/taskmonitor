@@ -1,25 +1,28 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   CheckCircle2, 
   Search, 
   Calendar, 
-  BarChart3, 
   Settings, 
-  Download, 
-  RefreshCw, 
-  Filter, 
-  ChevronDown, 
-  ChevronUp,
   LayoutDashboard,
   ListTodo,
-  LogOut,
-  AlertTriangle,
   Loader2,
-  X,
   Repeat,
   Archive,
-  Clock
+  Clock,
+  ShieldAlert,
+  Save
 } from 'lucide-react';
+
+/**
+ * --- TYPESCRIPT FIXES ---
+ */
+declare global {
+  interface Window {
+    gapi: any;
+    google: any;
+  }
+}
 
 /**
  * --- APP CONFIGURATION & TYPES ---
@@ -138,7 +141,7 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
   return (
     <div className="w-full overflow-x-auto pb-2">
       <div className="flex space-x-1 min-w-[max-content]">
-        {days.map((day, i) => (
+        {days.map((day) => (
           <div 
             key={day.date}
             title={`${day.date}: ${day.count} tasks`}
@@ -155,10 +158,20 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
 };
 
 export default function GoogleTasksMonitor() {
+  // --- ENVIRONMENT CHECK ---
+  // Detect if we are in "Dev Mode" (localhost or 127.0.0.1)
+  const isDev = useMemo(() => {
+    return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  }, []);
+
   // --- STATE ---
-  const [mode, setMode] = useState<'mock' | 'live'>('mock');
-  const [apiKey, setApiKey] = useState('');
-  const [clientId, setClientId] = useState('');
+  // Initialize from LocalStorage if available
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('gTasks_apiKey') || '');
+  const [clientId, setClientId] = useState(() => localStorage.getItem('gTasks_clientId') || '');
+  
+  // Default to 'live' so we can check for credentials immediately.
+  const [mode, setMode] = useState<'mock' | 'live'>('live');
+  
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingText, setLoadingText] = useState('');
@@ -192,6 +205,21 @@ export default function GoogleTasksMonitor() {
     };
   };
 
+  // --- EFFECT: CREDENTIAL PERSISTENCE & INITIAL REDIRECT ---
+  useEffect(() => {
+    // Save creds whenever they change
+    localStorage.setItem('gTasks_apiKey', apiKey);
+    localStorage.setItem('gTasks_clientId', clientId);
+  }, [apiKey, clientId]);
+
+  useEffect(() => {
+    // Initial redirect logic:
+    // If we are LIVE and missing credentials, force user to Settings.
+    if (mode === 'live' && (!apiKey || !clientId)) {
+      setActiveTab('settings');
+    }
+  }, [mode, apiKey, clientId]);
+
   // --- INITIALIZATION ---
   useEffect(() => {
     if (mode === 'mock') {
@@ -200,19 +228,29 @@ export default function GoogleTasksMonitor() {
       setAllTasks(tasks);
       setIsAuthenticated(true);
     } else {
-      // In Live mode, try to load cached data first so the user sees history immediately
+      // In Live mode, try to load cached data first
       const { tasks, lists } = loadFromLocal();
       if (tasks.length > 0) {
         setAllTasks(tasks);
         setAllLists(lists);
       }
       setIsAuthenticated(false);
+
+      // Auto-initialize Google Scripts if creds exist
+      if (apiKey && clientId) {
+        loadGis();
+        loadGapi();
+      }
     }
   }, [mode]);
 
   // --- GOOGLE API INTEGRATION ---
   const loadGapi = () => {
-    if (window.gapi) return;
+    if (window.gapi) {
+      // If already loaded, just init
+      initClient();
+      return;
+    }
     const script = document.createElement('script');
     script.src = 'https://apis.google.com/js/api.js';
     script.onload = () => window.gapi.load('client', initClient);
@@ -258,6 +296,9 @@ export default function GoogleTasksMonitor() {
           await fetchRealData();
         },
       });
+      
+      // We must explicitly request the token. 
+      // Note: Browsers may block this if not triggered by a click.
       tokenClient.requestAccessToken();
     } catch (err) {
       console.error(err);
@@ -268,9 +309,6 @@ export default function GoogleTasksMonitor() {
 
   /**
    * CORE LOGIC: History Preservation & Smart Merging
-   * This function merges new API data with Local data to detect:
-   * 1. Rollover of recurring tasks (Task was completed locally, but API says it's new/due later)
-   * 2. Deletions (Task missing from API but was completed locally)
    */
   const mergeTasks = (local: GoogleTask[], fetched: GoogleTask[]): GoogleTask[] => {
     const mergedMap = new Map<string, GoogleTask>();
@@ -281,42 +319,31 @@ export default function GoogleTasksMonitor() {
       const incoming = fetchedMap.get(localTask.id);
 
       if (incoming) {
-        // SCENARIO A: Task exists in both. Check for Recurrence Rollover.
-        // If local was 'completed' and incoming is 'needsAction' (and usually due later),
-        // it means Google reset the task for the next recurrence.
         if (localTask.status === 'completed' && incoming.status === 'needsAction') {
-          
-          // 1. Create a historical archive of the completed version
+          // Recurring task rollover detected
           const archivedTask: GoogleTask = {
             ...localTask,
-            id: `${localTask.id}_archived_${new Date().getTime()}`, // Unique ID for history
+            id: `${localTask.id}_archived_${new Date().getTime()}`,
             isArchived: true,
-            isRecurring: true // We inferred it's recurring
+            isRecurring: true
           };
           mergedMap.set(archivedTask.id, archivedTask);
-
-          // 2. Add the new "Upcoming" version as the main ID
           mergedMap.set(incoming.id, { ...incoming, isRecurring: true });
-        
         } else {
-          // Standard Update: Just take the latest from Google
-          // Preserve 'isRecurring' flag if we detected it before
           mergedMap.set(incoming.id, { 
             ...incoming, 
             isRecurring: localTask.isRecurring || incoming.isRecurring 
           });
         }
       } else {
-        // SCENARIO B: Task is in Local but NOT in API.
-        // If it was completed, keep it! (Google might have deleted history)
+        // Keep deleted/archived tasks locally
         if (localTask.status === 'completed' || localTask.isArchived) {
           mergedMap.set(localTask.id, { ...localTask, isArchived: true });
         }
-        // If it was 'needsAction' and is gone, it was likely deleted by user, so we drop it.
       }
     });
 
-    // 2. Process new API tasks that weren't in local at all
+    // 2. Process new API tasks
     fetched.forEach(fetchedTask => {
       if (!mergedMap.has(fetchedTask.id)) {
         mergedMap.set(fetchedTask.id, fetchedTask);
@@ -334,7 +361,6 @@ export default function GoogleTasksMonitor() {
       setAllLists(lists);
 
       const fetchedTasks: GoogleTask[] = [];
-      let processed = 0;
 
       for (const list of lists) {
         setLoadingText(`Scanning: ${list.title}`);
@@ -359,14 +385,11 @@ export default function GoogleTasksMonitor() {
 
           pageToken = tasksResp.result.nextPageToken;
         } while (pageToken);
-        processed++;
       }
 
-      // Perform Smart Merge
       const currentLocalTasks = loadFromLocal().tasks;
       const finalTasks = mergeTasks(currentLocalTasks, fetchedTasks);
       
-      // Sort: Most recently completed/updated first
       finalTasks.sort((a, b) => 
         new Date(b.completed || b.updated || 0).getTime() - new Date(a.completed || a.updated || 0).getTime()
       );
@@ -391,7 +414,6 @@ export default function GoogleTasksMonitor() {
       const q = searchQuery.toLowerCase();
       if (q && !task.title.toLowerCase().includes(q)) return false;
 
-      // Date Range Filter (applies to Completed date mostly)
       if (dateRange !== 'all') {
         const refDate = task.completed ? new Date(task.completed) : new Date(task.updated);
         const now = new Date();
@@ -606,29 +628,71 @@ export default function GoogleTasksMonitor() {
              <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
                <h2 className="text-xl font-bold text-slate-800 mb-6">Connection Settings</h2>
                
-               <div className="space-y-4">
-                 <div className="flex gap-2 bg-slate-50 p-1 rounded-lg">
-                   <button onClick={() => setMode('mock')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'mock' ? 'bg-white shadow' : 'text-slate-500'}`}>Mock Mode</button>
-                   <button onClick={() => setMode('live')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'live' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>Live API</button>
-                 </div>
+               <div className="space-y-6">
+                 
+                 {/* Mock Mode Toggle: Only shown in Dev Mode */}
+                 {isDev && (
+                   <div className="flex gap-2 bg-slate-50 p-1 rounded-lg">
+                     <button onClick={() => setMode('mock')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'mock' ? 'bg-white shadow' : 'text-slate-500'}`}>Mock Mode (Dev Only)</button>
+                     <button onClick={() => setMode('live')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'live' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>Live API</button>
+                   </div>
+                 )}
 
                  {mode === 'live' && (
                    <>
-                     <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800">
-                       <p className="font-semibold mb-1">Persistent History Active</p>
-                       <p>This app now saves your tasks to your browser. If a recurring task is completed and resets on Google, we will keep the completed record here in your history.</p>
+                     {!isAuthenticated && (
+                       <div className="bg-blue-50 p-4 rounded-lg flex gap-3">
+                         <ShieldAlert className="w-5 h-5 text-blue-600 shrink-0" />
+                         <div className="text-sm text-blue-800">
+                           <p className="font-semibold mb-1">Credentials Required</p>
+                           <p>Please enter your Google Cloud credentials below. They will be saved to your browser's local storage.</p>
+                         </div>
+                       </div>
+                     )}
+
+                     <div>
+                       <label className="block text-sm font-medium mb-1 text-slate-700">Client ID</label>
+                       <input 
+                         type="text" 
+                         value={clientId} 
+                         onChange={(e) => setClientId(e.target.value)} 
+                         placeholder="12345...apps.googleusercontent.com"
+                         className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" 
+                       />
                      </div>
                      <div>
-                       <label className="block text-sm font-medium mb-1">Client ID</label>
-                       <input type="text" value={clientId} onChange={(e) => setClientId(e.target.value)} className="w-full border rounded-lg px-3 py-2" />
+                       <label className="block text-sm font-medium mb-1 text-slate-700">API Key</label>
+                       <input 
+                         type="password" 
+                         value={apiKey} 
+                         onChange={(e) => setApiKey(e.target.value)} 
+                         placeholder="AIza..."
+                         className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" 
+                       />
                      </div>
-                     <div>
-                       <label className="block text-sm font-medium mb-1">API Key</label>
-                       <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full border rounded-lg px-3 py-2" />
+                     
+                     <div className="pt-2">
+                        <button 
+                          onClick={handleLiveConnect} 
+                          disabled={!clientId || !apiKey}
+                          className="w-full py-3 bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-medium hover:bg-blue-700 transition-colors flex justify-center items-center gap-2"
+                        >
+                          {isAuthenticated ? (
+                            <>
+                              <Save className="w-4 h-4" />
+                              <span>Refresh Data & Update Keys</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldAlert className="w-4 h-4" />
+                              <span>Connect to Google Tasks</span>
+                            </>
+                          )}
+                        </button>
+                        <p className="text-center text-xs text-slate-400 mt-3">
+                          Keys are saved locally. You may need to click Connect again if your session expires.
+                        </p>
                      </div>
-                     <button onClick={handleLiveConnect} className="w-full py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">
-                       {isAuthenticated ? 'Refresh Data' : 'Connect & Fetch'}
-                     </button>
                    </>
                  )}
                </div>
