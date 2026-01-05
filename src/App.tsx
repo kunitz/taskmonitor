@@ -11,7 +11,8 @@ import {
   Archive,
   Clock,
   ShieldAlert,
-  Save
+  Save,
+  CloudCog
 } from 'lucide-react';
 
 /**
@@ -159,17 +160,14 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
 
 export default function GoogleTasksMonitor() {
   // --- ENVIRONMENT CHECK ---
-  // Detect if we are in "Dev Mode" (localhost or 127.0.0.1)
   const isDev = useMemo(() => {
     return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   }, []);
 
   // --- STATE ---
-  // Initialize from LocalStorage if available
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gTasks_apiKey') || '');
   const [clientId, setClientId] = useState(() => localStorage.getItem('gTasks_clientId') || '');
   
-  // Default to 'live' so we can check for credentials immediately.
   const [mode, setMode] = useState<'mock' | 'live'>('live');
   
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -179,12 +177,10 @@ export default function GoogleTasksMonitor() {
   const [allTasks, setAllTasks] = useState<GoogleTask[]>([]);
   const [allLists, setAllLists] = useState<TaskList[]>([]);
   
-  // Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedListId, setSelectedListId] = useState<string>('all');
   const [dateRange, setDateRange] = useState<'all' | '7days' | '30days' | 'year'>('all');
 
-  // Navigation
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'settings'>('dashboard');
 
   // --- PERSISTENCE HELPERS ---
@@ -207,14 +203,11 @@ export default function GoogleTasksMonitor() {
 
   // --- EFFECT: CREDENTIAL PERSISTENCE & INITIAL REDIRECT ---
   useEffect(() => {
-    // Save creds whenever they change
     localStorage.setItem('gTasks_apiKey', apiKey);
     localStorage.setItem('gTasks_clientId', clientId);
   }, [apiKey, clientId]);
 
   useEffect(() => {
-    // Initial redirect logic:
-    // If we are LIVE and missing credentials, force user to Settings.
     if (mode === 'live' && (!apiKey || !clientId)) {
       setActiveTab('settings');
     }
@@ -228,7 +221,6 @@ export default function GoogleTasksMonitor() {
       setAllTasks(tasks);
       setIsAuthenticated(true);
     } else {
-      // In Live mode, try to load cached data first
       const { tasks, lists } = loadFromLocal();
       if (tasks.length > 0) {
         setAllTasks(tasks);
@@ -236,7 +228,6 @@ export default function GoogleTasksMonitor() {
       }
       setIsAuthenticated(false);
 
-      // Auto-initialize Google Scripts if creds exist
       if (apiKey && clientId) {
         loadGis();
         loadGapi();
@@ -247,7 +238,6 @@ export default function GoogleTasksMonitor() {
   // --- GOOGLE API INTEGRATION ---
   const loadGapi = () => {
     if (window.gapi) {
-      // If already loaded, just init
       initClient();
       return;
     }
@@ -290,15 +280,12 @@ export default function GoogleTasksMonitor() {
     try {
       const tokenClient = window.google.accounts.oauth2.initTokenClient({
         client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/tasks.readonly',
+        scope: 'https://www.googleapis.com/auth/tasks',
         callback: async (resp: any) => {
           if (resp.error) throw resp;
           await fetchRealData();
         },
       });
-      
-      // We must explicitly request the token. 
-      // Note: Browsers may block this if not triggered by a click.
       tokenClient.requestAccessToken();
     } catch (err) {
       console.error(err);
@@ -307,50 +294,52 @@ export default function GoogleTasksMonitor() {
     }
   };
 
-  /**
-   * CORE LOGIC: History Preservation & Smart Merging
-   */
-  const mergeTasks = (local: GoogleTask[], fetched: GoogleTask[]): GoogleTask[] => {
-    const mergedMap = new Map<string, GoogleTask>();
-    const fetchedMap = new Map(fetched.map(t => [t.id, t]));
-
-    // 1. Process all Local Tasks first
-    local.forEach(localTask => {
-      const incoming = fetchedMap.get(localTask.id);
-
-      if (incoming) {
-        if (localTask.status === 'completed' && incoming.status === 'needsAction') {
-          // Recurring task rollover detected
-          const archivedTask: GoogleTask = {
-            ...localTask,
-            id: `${localTask.id}_archived_${new Date().getTime()}`,
-            isArchived: true,
-            isRecurring: true
-          };
-          mergedMap.set(archivedTask.id, archivedTask);
-          mergedMap.set(incoming.id, { ...incoming, isRecurring: true });
-        } else {
-          mergedMap.set(incoming.id, { 
-            ...incoming, 
-            isRecurring: localTask.isRecurring || incoming.isRecurring 
-          });
+  // --- ARCHIVE LOGIC ---
+  const archiveTaskRemote = async (task: GoogleTask) => {
+    try {
+      // Create a new task in Google Tasks that represents the completed history
+      await window.gapi.client.tasks.tasks.insert({
+        tasklist: task.listId,
+        resource: {
+          title: task.title, 
+          status: 'completed',
+          completed: task.completed, 
+          notes: (task.notes || "") + "\n[Archived History of Recurring Task]", // MARKER
+          deleted: false,
+          hidden: false
         }
-      } else {
-        // Keep deleted/archived tasks locally
-        if (localTask.status === 'completed' || localTask.isArchived) {
-          mergedMap.set(localTask.id, { ...localTask, isArchived: true });
-        }
-      }
-    });
+      });
+      console.log(`Archived recurring task: ${task.title}`);
+      return true;
+    } catch (error) {
+      console.error("Failed to archive task remote", error);
+      return false;
+    }
+  };
 
-    // 2. Process new API tasks
-    fetched.forEach(fetchedTask => {
-      if (!mergedMap.has(fetchedTask.id)) {
-        mergedMap.set(fetchedTask.id, fetchedTask);
-      }
+  // --- RACE CONDITION MITIGATION ---
+  const isDuplicateArchive = (localTask: GoogleTask, allRemoteTasks: GoogleTask[]) => {
+    // We look for a remote task that matches our candidate almost exactly
+    return allRemoteTasks.some(remote => {
+      // 1. Must be completed
+      if (remote.status !== 'completed') return false;
+      // 2. Must have same title
+      if (remote.title !== localTask.title) return false;
+      // 3. Must have the special archive marker we add
+      if (!remote.notes?.includes('[Archived History of Recurring Task]')) return false;
+      
+      // 4. Timestamp Check
+      // This is the tricky part. We compare the 'completed' timestamp.
+      // If we already archived it, the remote task should have the same timestamp.
+      if (!remote.completed || !localTask.completed) return false;
+      
+      const remoteTime = new Date(remote.completed).getTime();
+      const localTime = new Date(localTask.completed).getTime();
+      
+      // Allow for small time drift or ISO string differences (e.g. milliseconds vs seconds)
+      // If they are within 60 seconds of each other, assume it's the same completion event
+      return Math.abs(remoteTime - localTime) < 60000; 
     });
-
-    return Array.from(mergedMap.values());
   };
 
   const fetchRealData = async () => {
@@ -387,15 +376,44 @@ export default function GoogleTasksMonitor() {
         } while (pageToken);
       }
 
-      const currentLocalTasks = loadFromLocal().tasks;
-      const finalTasks = mergeTasks(currentLocalTasks, fetchedTasks);
-      
-      finalTasks.sort((a, b) => 
+      // --- SMART ARCHIVE LOGIC ---
+      setLoadingText('Analyzing history...');
+      const localData = loadFromLocal();
+      const localTasksMap = new Map(localData.tasks.map((t: any) => [t.id, t]));
+      const tasksToArchive: GoogleTask[] = [];
+
+      // Detect Rollovers
+      for (const fetchedTask of fetchedTasks) {
+        const localTask = localTasksMap.get(fetchedTask.id);
+        
+        // CONDITION: Local says 'completed', Remote says 'needsAction'
+        if (localTask && localTask.status === 'completed' && fetchedTask.status === 'needsAction') {
+          
+          // CRITICAL: DEDUPLICATION CHECK
+          // Before we add this to the "To Archive" pile, check if it already exists remotely.
+          // This happens if another device already ran this logic.
+          const alreadyExists = isDuplicateArchive(localTask, fetchedTasks);
+          
+          if (!alreadyExists) {
+             tasksToArchive.push(localTask);
+          } else {
+             console.log(`Skipping archive for '${localTask.title}' - already exists on server.`);
+          }
+        }
+      }
+
+      // Execute Writes to Google
+      if (tasksToArchive.length > 0) {
+        setLoadingText(`Archiving ${tasksToArchive.length} recurring tasks to Google History...`);
+        await Promise.all(tasksToArchive.map(archiveTaskRemote));
+      }
+
+      fetchedTasks.sort((a, b) => 
         new Date(b.completed || b.updated || 0).getTime() - new Date(a.completed || a.updated || 0).getTime()
       );
 
-      setAllTasks(finalTasks);
-      saveToLocal(finalTasks, lists);
+      setAllTasks(fetchedTasks);
+      saveToLocal(fetchedTasks, lists);
       setIsAuthenticated(true);
 
     } catch (err) {
@@ -649,6 +667,14 @@ export default function GoogleTasksMonitor() {
                          </div>
                        </div>
                      )}
+
+                     <div className="bg-emerald-50 p-4 rounded-lg flex gap-3 border border-emerald-100">
+                        <CloudCog className="w-5 h-5 text-emerald-600 shrink-0" />
+                        <div className="text-sm text-emerald-800">
+                          <p className="font-semibold mb-1">Auto-Archive Enabled</p>
+                          <p>When a recurring task is completed and resets, this app will now create a permanent "History" copy in your Google Tasks account automatically.</p>
+                        </div>
+                     </div>
 
                      <div>
                        <label className="block text-sm font-medium mb-1 text-slate-700">Client ID</label>
