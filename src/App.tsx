@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 /**
- * --- TYPESCRIPT FIXES ---
+ * --- TYPESCRIPT DECLARATIONS ---
  */
 declare global {
   interface Window {
@@ -192,7 +192,8 @@ export default function GoogleTasksMonitor() {
     localStorage.setItem(STORAGE_KEY_LISTS, JSON.stringify(lists));
   };
 
-  const loadFromLocal = () => {
+  // FIX: Explicitly typed return value so TS knows it's not {}
+  const loadFromLocal = (): { tasks: GoogleTask[], lists: TaskList[] } => {
     const t = localStorage.getItem(STORAGE_KEY_TASKS);
     const l = localStorage.getItem(STORAGE_KEY_LISTS);
     return {
@@ -297,14 +298,13 @@ export default function GoogleTasksMonitor() {
   // --- ARCHIVE LOGIC ---
   const archiveTaskRemote = async (task: GoogleTask) => {
     try {
-      // Create a new task in Google Tasks that represents the completed history
       await window.gapi.client.tasks.tasks.insert({
         tasklist: task.listId,
         resource: {
           title: task.title, 
           status: 'completed',
           completed: task.completed, 
-          notes: (task.notes || "") + "\n[Archived History of Recurring Task]", // MARKER
+          notes: (task.notes || "") + "\n[Archived History of Recurring Task]",
           deleted: false,
           hidden: false
         }
@@ -319,25 +319,16 @@ export default function GoogleTasksMonitor() {
 
   // --- RACE CONDITION MITIGATION ---
   const isDuplicateArchive = (localTask: GoogleTask, allRemoteTasks: GoogleTask[]) => {
-    // We look for a remote task that matches our candidate almost exactly
     return allRemoteTasks.some(remote => {
-      // 1. Must be completed
       if (remote.status !== 'completed') return false;
-      // 2. Must have same title
       if (remote.title !== localTask.title) return false;
-      // 3. Must have the special archive marker we add
       if (!remote.notes?.includes('[Archived History of Recurring Task]')) return false;
       
-      // 4. Timestamp Check
-      // This is the tricky part. We compare the 'completed' timestamp.
-      // If we already archived it, the remote task should have the same timestamp.
       if (!remote.completed || !localTask.completed) return false;
       
       const remoteTime = new Date(remote.completed).getTime();
       const localTime = new Date(localTask.completed).getTime();
       
-      // Allow for small time drift or ISO string differences (e.g. milliseconds vs seconds)
-      // If they are within 60 seconds of each other, assume it's the same completion event
       return Math.abs(remoteTime - localTime) < 60000; 
     });
   };
@@ -379,7 +370,13 @@ export default function GoogleTasksMonitor() {
       // --- SMART ARCHIVE LOGIC ---
       setLoadingText('Analyzing history...');
       const localData = loadFromLocal();
-      const localTasksMap = new Map(localData.tasks.map((t: any) => [t.id, t]));
+      
+      // FIX: Explicitly type the map to avoid TS errors about '{}'
+      const localTasksMap = new Map<string, GoogleTask>();
+      if (localData.tasks) {
+        localData.tasks.forEach(t => localTasksMap.set(t.id, t));
+      }
+
       const tasksToArchive: GoogleTask[] = [];
 
       // Detect Rollovers
@@ -389,9 +386,7 @@ export default function GoogleTasksMonitor() {
         // CONDITION: Local says 'completed', Remote says 'needsAction'
         if (localTask && localTask.status === 'completed' && fetchedTask.status === 'needsAction') {
           
-          // CRITICAL: DEDUPLICATION CHECK
-          // Before we add this to the "To Archive" pile, check if it already exists remotely.
-          // This happens if another device already ran this logic.
+          // DEDUPLICATION CHECK
           const alreadyExists = isDuplicateArchive(localTask, fetchedTasks);
           
           if (!alreadyExists) {
