@@ -15,7 +15,10 @@ import {
   LogOut,
   AlertTriangle,
   Loader2,
-  X
+  X,
+  Repeat,
+  Archive,
+  Clock
 } from 'lucide-react';
 
 /**
@@ -29,10 +32,14 @@ interface GoogleTask {
   title: string;
   status: TaskStatus;
   completed?: string; // ISO Date string
+  due?: string; // ISO Date string (RFC 3339)
   updated: string;
   notes?: string;
-  listId: string; // Helper property we add for aggregation
+  listId: string; // Helper property
   listName?: string; // Helper property
+  isArchived?: boolean; // Flag for locally preserved history
+  isRecurring?: boolean; // Flag if we detect it's a recurring task
+  recurrenceInterval?: string; // Mock field (API doesn't standardize this easily)
 }
 
 interface TaskList {
@@ -46,48 +53,44 @@ const generateMockData = (): { lists: TaskList[], tasks: GoogleTask[] } => {
     { id: '1', title: 'My Tasks' },
     { id: '2', title: 'Work Projects' },
     { id: '3', title: 'Groceries' },
-    { id: '4', title: 'House Maintenance' },
   ];
 
   const tasks: GoogleTask[] = [];
   const now = new Date();
   
-  // Generate 200 mock tasks scattered over the last year
-  for (let i = 0; i < 200; i++) {
-    const isCompleted = Math.random() > 0.2; // 80% completed
-    const daysAgo = Math.floor(Math.random() * 365);
-    const date = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
-    const list = lists[Math.floor(Math.random() * lists.length)];
+  // Generate mock tasks
+  for (let i = 0; i < 50; i++) {
+    const isCompleted = Math.random() > 0.3;
+    const daysOffset = Math.floor(Math.random() * 60) - 30; // +/- 30 days
+    const date = new Date(now.getTime() - daysOffset * 24 * 60 * 60 * 1000);
+    const dueDate = new Date(now.getTime() + (Math.random() * 10) * 24 * 60 * 60 * 1000);
+    
+    // Simulate some recurring tasks
+    const isRecurring = i % 5 === 0;
     
     tasks.push({
       id: `task-${i}`,
-      title: [
-        'Review quarterly report', 'Buy milk', 'Call mom', 'Update website', 
-        'Fix navbar bug', 'Schedule dentist', 'Team meeting', 'Pay bills',
-        'Clean garage', 'Read documentation', 'Reply to emails', 'Plan vacation'
-      ][Math.floor(Math.random() * 12)] + ` ${i}`,
+      title: isRecurring 
+        ? `Submit Timesheet (Recurring) ${i}` 
+        : `Task ${i} - ${['Review document', 'Email client', 'Update styles', 'Fix bug'][i % 4]} with a very long description that might break the layout if we are not careful about css classes`,
       status: isCompleted ? 'completed' : 'needsAction',
       completed: isCompleted ? date.toISOString() : undefined,
+      due: dueDate.toISOString(),
       updated: date.toISOString(),
-      listId: list.id,
-      listName: list.title
+      listId: lists[i % lists.length].id,
+      listName: lists[i % lists.length].title,
+      isRecurring: isRecurring,
+      recurrenceInterval: isRecurring ? 'Weekly' : undefined
     });
   }
 
-  // Sort by completed date descending
-  return { 
-    lists, 
-    tasks: tasks.sort((a, b) => 
-      new Date(b.completed || 0).getTime() - new Date(a.completed || 0).getTime()
-    ) 
-  };
+  return { lists, tasks };
 };
 
 /**
  * --- COMPONENTS ---
  */
 
-// 1. STAT CARD
 const StatCard = ({ title, value, icon: Icon, colorClass }: any) => (
   <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center space-x-4">
     <div className={`p-3 rounded-lg ${colorClass} bg-opacity-10`}>
@@ -100,9 +103,7 @@ const StatCard = ({ title, value, icon: Icon, colorClass }: any) => (
   </div>
 );
 
-// 2. HEATMAP COMPONENT
 const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
-  // Generate last 365 days map
   const today = new Date();
   const days = useMemo(() => {
     const map = new Map<string, number>();
@@ -141,7 +142,7 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
           <div 
             key={day.date}
             title={`${day.date}: ${day.count} tasks`}
-            className={`w-3 h-8 rounded-sm ${getColor(day.count)} transition-all hover:opacity-80`}
+            className={`w-3 h-8 rounded-sm ${getColor(day.count)}`}
           />
         ))}
       </div>
@@ -153,7 +154,6 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
   );
 };
 
-// 3. MAIN APP COMPONENT
 export default function GoogleTasksMonitor() {
   // --- STATE ---
   const [mode, setMode] = useState<'mock' | 'live'>('mock');
@@ -174,6 +174,24 @@ export default function GoogleTasksMonitor() {
   // Navigation
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'settings'>('dashboard');
 
+  // --- PERSISTENCE HELPERS ---
+  const STORAGE_KEY_TASKS = 'gTasks_monitor_tasks';
+  const STORAGE_KEY_LISTS = 'gTasks_monitor_lists';
+
+  const saveToLocal = (tasks: GoogleTask[], lists: TaskList[]) => {
+    localStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(tasks));
+    localStorage.setItem(STORAGE_KEY_LISTS, JSON.stringify(lists));
+  };
+
+  const loadFromLocal = () => {
+    const t = localStorage.getItem(STORAGE_KEY_TASKS);
+    const l = localStorage.getItem(STORAGE_KEY_LISTS);
+    return {
+      tasks: t ? JSON.parse(t) : [],
+      lists: l ? JSON.parse(l) : []
+    };
+  };
+
   // --- INITIALIZATION ---
   useEffect(() => {
     if (mode === 'mock') {
@@ -182,29 +200,29 @@ export default function GoogleTasksMonitor() {
       setAllTasks(tasks);
       setIsAuthenticated(true);
     } else {
-      // Reset for live mode
-      setAllTasks([]);
-      setAllLists([]);
+      // In Live mode, try to load cached data first so the user sees history immediately
+      const { tasks, lists } = loadFromLocal();
+      if (tasks.length > 0) {
+        setAllTasks(tasks);
+        setAllLists(lists);
+      }
       setIsAuthenticated(false);
     }
   }, [mode]);
 
-  // --- GOOGLE API INTEGRATION (LIVE MODE) ---
+  // --- GOOGLE API INTEGRATION ---
   const loadGapi = () => {
+    if (window.gapi) return;
     const script = document.createElement('script');
     script.src = 'https://apis.google.com/js/api.js';
-    script.onload = () => {
-      window.gapi.load('client', initClient);
-    };
+    script.onload = () => window.gapi.load('client', initClient);
     document.body.appendChild(script);
   };
 
   const loadGis = () => {
+    if (window.google) return;
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
-    script.onload = () => {
-      // GIS loaded
-    };
     document.body.appendChild(script);
   };
 
@@ -215,8 +233,6 @@ export default function GoogleTasksMonitor() {
         apiKey: apiKey,
         discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/tasks/v1/rest'],
       });
-      // In a real scenario, we would setup the TokenClient here using GIS
-      // For this single-file demo, we'll prompt the user if they try to connect
     } catch (err) {
       console.error('Error initializing GAPI client', err);
     }
@@ -238,9 +254,7 @@ export default function GoogleTasksMonitor() {
         client_id: clientId,
         scope: 'https://www.googleapis.com/auth/tasks.readonly',
         callback: async (resp: any) => {
-          if (resp.error) {
-            throw resp;
-          }
+          if (resp.error) throw resp;
           await fetchRealData();
         },
       });
@@ -248,32 +262,89 @@ export default function GoogleTasksMonitor() {
     } catch (err) {
       console.error(err);
       setIsLoading(false);
-      alert('Authentication failed or popup blocked. See console for details.');
+      alert('Authentication failed. Check console.');
     }
   };
 
+  /**
+   * CORE LOGIC: History Preservation & Smart Merging
+   * This function merges new API data with Local data to detect:
+   * 1. Rollover of recurring tasks (Task was completed locally, but API says it's new/due later)
+   * 2. Deletions (Task missing from API but was completed locally)
+   */
+  const mergeTasks = (local: GoogleTask[], fetched: GoogleTask[]): GoogleTask[] => {
+    const mergedMap = new Map<string, GoogleTask>();
+    const fetchedMap = new Map(fetched.map(t => [t.id, t]));
+
+    // 1. Process all Local Tasks first
+    local.forEach(localTask => {
+      const incoming = fetchedMap.get(localTask.id);
+
+      if (incoming) {
+        // SCENARIO A: Task exists in both. Check for Recurrence Rollover.
+        // If local was 'completed' and incoming is 'needsAction' (and usually due later),
+        // it means Google reset the task for the next recurrence.
+        if (localTask.status === 'completed' && incoming.status === 'needsAction') {
+          
+          // 1. Create a historical archive of the completed version
+          const archivedTask: GoogleTask = {
+            ...localTask,
+            id: `${localTask.id}_archived_${new Date().getTime()}`, // Unique ID for history
+            isArchived: true,
+            isRecurring: true // We inferred it's recurring
+          };
+          mergedMap.set(archivedTask.id, archivedTask);
+
+          // 2. Add the new "Upcoming" version as the main ID
+          mergedMap.set(incoming.id, { ...incoming, isRecurring: true });
+        
+        } else {
+          // Standard Update: Just take the latest from Google
+          // Preserve 'isRecurring' flag if we detected it before
+          mergedMap.set(incoming.id, { 
+            ...incoming, 
+            isRecurring: localTask.isRecurring || incoming.isRecurring 
+          });
+        }
+      } else {
+        // SCENARIO B: Task is in Local but NOT in API.
+        // If it was completed, keep it! (Google might have deleted history)
+        if (localTask.status === 'completed' || localTask.isArchived) {
+          mergedMap.set(localTask.id, { ...localTask, isArchived: true });
+        }
+        // If it was 'needsAction' and is gone, it was likely deleted by user, so we drop it.
+      }
+    });
+
+    // 2. Process new API tasks that weren't in local at all
+    fetched.forEach(fetchedTask => {
+      if (!mergedMap.has(fetchedTask.id)) {
+        mergedMap.set(fetchedTask.id, fetchedTask);
+      }
+    });
+
+    return Array.from(mergedMap.values());
+  };
+
   const fetchRealData = async () => {
-    setLoadingText('Fetching Task Lists...');
+    setLoadingText('Fetching Lists...');
     try {
-      // 1. Get Lists
       const listsResp = await window.gapi.client.tasks.tasklists.list();
       const lists = listsResp.result.items || [];
       setAllLists(lists);
 
-      // 2. Get Tasks for each list
       const fetchedTasks: GoogleTask[] = [];
       let processed = 0;
 
       for (const list of lists) {
-        setLoadingText(`Scanning list: ${list.title}...`);
-        
+        setLoadingText(`Scanning: ${list.title}`);
         let pageToken = null;
         do {
           const tasksResp: any = await window.gapi.client.tasks.tasks.list({
             tasklist: list.id,
             showCompleted: true,
             showHidden: true,
-            maxResults: 100, // Max allowed by API
+            maxResults: 100,
             pageToken: pageToken
           });
 
@@ -288,49 +359,47 @@ export default function GoogleTasksMonitor() {
 
           pageToken = tasksResp.result.nextPageToken;
         } while (pageToken);
-        
         processed++;
       }
 
-      setAllTasks(fetchedTasks.sort((a, b) => 
-        new Date(b.completed || 0).getTime() - new Date(a.completed || 0).getTime()
-      ));
+      // Perform Smart Merge
+      const currentLocalTasks = loadFromLocal().tasks;
+      const finalTasks = mergeTasks(currentLocalTasks, fetchedTasks);
+      
+      // Sort: Most recently completed/updated first
+      finalTasks.sort((a, b) => 
+        new Date(b.completed || b.updated || 0).getTime() - new Date(a.completed || a.updated || 0).getTime()
+      );
+
+      setAllTasks(finalTasks);
+      saveToLocal(finalTasks, lists);
       setIsAuthenticated(true);
+
     } catch (err) {
-      console.error('Error fetching data', err);
-      alert('Failed to fetch data. Check API Quotas or Console.');
+      console.error('Fetch Error', err);
+      alert('Failed to fetch. Check console.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // --- FILTERING LOGIC ---
+  // --- FILTERING ---
   const filteredTasks = useMemo(() => {
     return allTasks.filter(task => {
-      // 1. Status Filter (Always show completed for history purposes, or both)
-      // For this app, we focus on completed mostly, but let's show all matching the search
-      
-      // 2. List Filter
       if (selectedListId !== 'all' && task.listId !== selectedListId) return false;
-
-      // 3. Search Filter
+      
       const q = searchQuery.toLowerCase();
       if (q && !task.title.toLowerCase().includes(q)) return false;
 
-      // 4. Date Filter
-      if (task.completed) {
-        const completedDate = new Date(task.completed);
+      // Date Range Filter (applies to Completed date mostly)
+      if (dateRange !== 'all') {
+        const refDate = task.completed ? new Date(task.completed) : new Date(task.updated);
         const now = new Date();
-        const diffTime = Math.abs(now.getTime() - completedDate.getTime());
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
+        const diffDays = Math.ceil(Math.abs(now.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
+        
         if (dateRange === '7days' && diffDays > 7) return false;
         if (dateRange === '30days' && diffDays > 30) return false;
         if (dateRange === 'year' && diffDays > 365) return false;
-      } else if (dateRange !== 'all') {
-        // If filtering by date but task isn't completed, decide behavior.
-        // Usually we only show completed in history view.
-        return false;
       }
 
       return true;
@@ -341,44 +410,19 @@ export default function GoogleTasksMonitor() {
     const completed = allTasks.filter(t => t.status === 'completed');
     const now = new Date();
     const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const thisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
     return {
       total: allTasks.length,
       completedTotal: completed.length,
       completedWeek: completed.filter(t => t.completed && new Date(t.completed) > oneWeekAgo).length,
-      completedMonth: completed.filter(t => t.completed && new Date(t.completed) > thisMonth).length,
+      recurringCount: allTasks.filter(t => t.isRecurring).length
     };
   }, [allTasks]);
-
-  // --- EXPORT ---
-  const handleExport = () => {
-    const headers = ['Task ID', 'List Name', 'Title', 'Status', 'Completed Date', 'Notes'];
-    const csvContent = [
-      headers.join(','),
-      ...filteredTasks.map(t => [
-        t.id,
-        `"${t.listName || ''}"`,
-        `"${t.title.replace(/"/g, '""')}"`,
-        t.status,
-        t.completed || '',
-        `"${(t.notes || '').replace(/"/g, '""')}"`
-      ].join(','))
-    ].join('\n');
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `google_tasks_export_${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
-  };
 
   // --- RENDER HELPERS ---
   const LoadingOverlay = () => (
     <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
       <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
       <h3 className="text-xl font-semibold text-slate-800">{loadingText}</h3>
-      <p className="text-slate-500 mt-2">Connecting to Google Tasks API...</p>
     </div>
   );
 
@@ -396,40 +440,19 @@ export default function GoogleTasksMonitor() {
         </div>
 
         <nav className="flex-1 p-4 space-y-2">
-          <button 
-            onClick={() => setActiveTab('dashboard')}
-            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'dashboard' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
-          >
+          <button onClick={() => setActiveTab('dashboard')} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'dashboard' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}>
             <LayoutDashboard className="w-5 h-5" />
             <span>Dashboard</span>
           </button>
-          <button 
-            onClick={() => setActiveTab('history')}
-            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'history' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
-          >
+          <button onClick={() => setActiveTab('history')} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'history' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}>
             <ListTodo className="w-5 h-5" />
             <span>Task History</span>
           </button>
-          <button 
-            onClick={() => setActiveTab('settings')}
-            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'settings' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
-          >
+          <button onClick={() => setActiveTab('settings')} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${activeTab === 'settings' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}>
             <Settings className="w-5 h-5" />
             <span>Connection</span>
           </button>
         </nav>
-
-        <div className="p-4 border-t border-slate-100 bg-slate-50">
-          <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
-            <span className="font-semibold uppercase tracking-wider">Current Mode</span>
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${mode === 'mock' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
-              {mode}
-            </span>
-          </div>
-          <p className="text-xs text-slate-400">
-            {mode === 'mock' ? 'Using generated sample data.' : 'Connected to real API.'}
-          </p>
-        </div>
       </aside>
 
       {/* MAIN CONTENT */}
@@ -441,319 +464,176 @@ export default function GoogleTasksMonitor() {
               {activeTab === 'history' && 'Search History'}
               {activeTab === 'settings' && 'App Settings'}
             </h1>
-            <p className="text-slate-500 text-sm mt-1">
-              {activeTab === 'dashboard' && `Welcome back. You've completed ${stats.completedWeek} tasks this week.`}
-              {activeTab === 'history' && 'Filter and export your completed tasks.'}
-              {activeTab === 'settings' && 'Configure API keys and connection modes.'}
-            </p>
           </div>
-          
-          {activeTab === 'history' && (
-            <div className="flex items-center space-x-3">
-              <button 
-                onClick={handleExport}
-                className="flex items-center space-x-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                <span>Export CSV</span>
-              </button>
-            </div>
-          )}
         </header>
 
         <div className="p-8">
           
-          {/* --- DASHBOARD VIEW --- */}
+          {/* DASHBOARD */}
           {activeTab === 'dashboard' && (
             <div className="space-y-8 animate-in fade-in duration-500">
-              {/* Stats Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <StatCard 
-                  title="Total Completed" 
-                  value={stats.completedTotal} 
-                  icon={CheckCircle2} 
-                  colorClass="bg-green-500" 
-                />
-                <StatCard 
-                  title="This Week" 
-                  value={stats.completedWeek} 
-                  icon={Calendar} 
-                  colorClass="bg-blue-500" 
-                />
-                <StatCard 
-                  title="This Month" 
-                  value={stats.completedMonth} 
-                  icon={BarChart3} 
-                  colorClass="bg-purple-500" 
-                />
-                <StatCard 
-                  title="Completion Rate" 
-                  value={`${allTasks.length ? Math.round((stats.completedTotal / allTasks.length) * 100) : 0}%`} 
-                  icon={RefreshCw} 
-                  colorClass="bg-orange-500" 
-                />
+                <StatCard title="Total Stored" value={stats.total} icon={Archive} colorClass="bg-slate-500" />
+                <StatCard title="Completed (All Time)" value={stats.completedTotal} icon={CheckCircle2} colorClass="bg-green-500" />
+                <StatCard title="Completed (7 Days)" value={stats.completedWeek} icon={Calendar} colorClass="bg-blue-500" />
+                <StatCard title="Recurring Tracked" value={stats.recurringCount} icon={Repeat} colorClass="bg-purple-500" />
               </div>
-
-              {/* Heatmap Section */}
               <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-                <div className="flex items-center justify-between mb-6">
-                  <h3 className="font-bold text-lg text-slate-800">Activity Heatmap</h3>
-                  <div className="flex items-center text-sm text-slate-500 space-x-2">
-                    <div className="w-3 h-3 bg-slate-100 rounded-sm"></div>
-                    <span>Less</span>
-                    <div className="w-3 h-3 bg-emerald-600 rounded-sm"></div>
-                    <span>More</span>
-                  </div>
-                </div>
+                <h3 className="font-bold text-lg text-slate-800 mb-6">Activity Heatmap</h3>
                 <ActivityHeatmap tasks={allTasks} />
-              </div>
-
-              {/* Recent Tasks */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="font-bold text-lg text-slate-800">Recently Completed</h3>
-                  <button 
-                    onClick={() => setActiveTab('history')}
-                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-                  >
-                    View All
-                  </button>
-                </div>
-                <div className="divide-y divide-slate-100">
-                  {allTasks.filter(t => t.status === 'completed').slice(0, 5).map(task => (
-                    <div key={task.id} className="p-4 flex items-center space-x-4 hover:bg-slate-50 transition-colors">
-                      <div className="flex-shrink-0">
-                        <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-slate-900 truncate">{task.title}</p>
-                        <p className="text-xs text-slate-500 truncate">{task.listName} • {new Date(task.completed || '').toLocaleDateString()}</p>
-                      </div>
-                    </div>
-                  ))}
-                  {allTasks.length === 0 && (
-                    <div className="p-8 text-center text-slate-500">
-                      No completed tasks found.
-                    </div>
-                  )}
-                </div>
               </div>
             </div>
           )}
 
-          {/* --- HISTORY VIEW --- */}
+          {/* HISTORY VIEW */}
           {activeTab === 'history' && (
             <div className="space-y-6 animate-in fade-in duration-500">
-              
-              {/* Filters Toolbar */}
-              <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col md:flex-row gap-4">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                   <input 
                     type="text"
-                    placeholder="Search tasks..."
+                    placeholder="Search by title..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                    className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                   />
                 </div>
-                
-                <div className="flex items-center space-x-3 overflow-x-auto pb-2 md:pb-0">
-                  <div className="flex items-center space-x-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
-                    <Filter className="w-4 h-4 text-slate-500" />
-                    <select 
-                      value={selectedListId}
-                      onChange={(e) => setSelectedListId(e.target.value)}
-                      className="bg-transparent text-sm font-medium text-slate-700 focus:outline-none cursor-pointer"
-                    >
-                      <option value="all">All Lists</option>
-                      {allLists.map(list => (
-                        <option key={list.id} value={list.id}>{list.title}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="flex items-center space-x-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
-                    <Calendar className="w-4 h-4 text-slate-500" />
-                    <select 
-                      value={dateRange}
-                      onChange={(e) => setDateRange(e.target.value as any)}
-                      className="bg-transparent text-sm font-medium text-slate-700 focus:outline-none cursor-pointer"
-                    >
-                      <option value="all">All Time</option>
-                      <option value="7days">Last 7 Days</option>
-                      <option value="30days">Last 30 Days</option>
-                      <option value="year">Last Year</option>
-                    </select>
-                  </div>
+                <div className="flex gap-2">
+                  <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                    <option value="all">All Lists</option>
+                    {allLists.map(l => <option key={l.id} value={l.id}>{l.title}</option>)}
+                  </select>
+                  <select value={dateRange} onChange={(e) => setDateRange(e.target.value as any)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                    <option value="all">All Time</option>
+                    <option value="7days">Last 7 Days</option>
+                    <option value="30days">Last 30 Days</option>
+                  </select>
                 </div>
               </div>
 
-              {/* Task List */}
               <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
+                  <table className="w-full text-left border-collapse table-fixed">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500 font-semibold">
-                        <th className="px-6 py-4">Status</th>
-                        <th className="px-6 py-4">Task</th>
-                        <th className="px-6 py-4">List</th>
-                        <th className="px-6 py-4">Completed On</th>
+                        <th className="px-4 py-4 w-12 text-center">Status</th>
+                        <th className="px-4 py-4 w-[40%]">Task Description</th>
+                        <th className="px-4 py-4 w-28">List</th>
+                        <th className="px-4 py-4 w-32">Due Date</th>
+                        <th className="px-4 py-4 w-32">Completed On</th>
+                        <th className="px-4 py-4 w-16 text-center">Repeat</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {filteredTasks.map((task) => (
                         <tr key={task.id} className="hover:bg-slate-50 transition-colors group">
-                          <td className="px-6 py-4 w-16">
+                          <td className="px-4 py-4 text-center">
                             {task.status === 'completed' ? (
-                              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                              <CheckCircle2 className="w-5 h-5 text-emerald-500 mx-auto" />
                             ) : (
-                              <div className="w-5 h-5 rounded-full border-2 border-slate-300" />
+                              <div className="w-4 h-4 rounded-full border-2 border-slate-300 mx-auto" />
                             )}
                           </td>
-                          <td className="px-6 py-4">
-                            <span className={`text-sm font-medium ${task.status === 'completed' ? 'text-slate-500 line-through decoration-slate-300' : 'text-slate-800'}`}>
-                              {task.title}
-                            </span>
-                            {task.notes && (
-                              <p className="text-xs text-slate-400 mt-1 line-clamp-1">{task.notes}</p>
-                            )}
+                          
+                          {/* Title with truncation */}
+                          <td className="px-4 py-4 overflow-hidden">
+                            <div className="flex flex-col">
+                              <span 
+                                title={task.title}
+                                className={`text-sm font-medium truncate ${task.status === 'completed' ? 'text-slate-500 line-through' : 'text-slate-800'}`}
+                              >
+                                {task.title}
+                              </span>
+                              {task.notes && (
+                                <span className="text-xs text-slate-400 truncate mt-0.5">{task.notes}</span>
+                              )}
+                              {task.isArchived && (
+                                <span className="inline-flex mt-1 items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 w-fit">
+                                  <Archive className="w-3 h-3 mr-1" />
+                                  Archived History
+                                </span>
+                              )}
+                            </div>
                           </td>
-                          <td className="px-6 py-4">
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
+
+                          {/* List */}
+                          <td className="px-4 py-4">
+                            <span className="inline-block px-2 py-1 rounded text-xs font-medium bg-slate-100 text-slate-600 truncate max-w-full">
                               {task.listName}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-sm text-slate-500 tabular-nums">
+
+                          {/* Due Date */}
+                          <td className="px-4 py-4 text-sm text-slate-600">
+                            {task.due ? (
+                              <div className={`flex items-center space-x-1 ${new Date(task.due) < new Date() && task.status !== 'completed' ? 'text-red-600 font-medium' : ''}`}>
+                                <Clock className="w-3 h-3" />
+                                <span>{new Date(task.due).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                              </div>
+                            ) : '-'}
+                          </td>
+
+                          {/* Completed Date */}
+                          <td className="px-4 py-4 text-sm text-slate-500">
                             {task.completed ? new Date(task.completed).toLocaleDateString(undefined, {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit'
+                              year: '2-digit',
+                              month: 'numeric',
+                              day: 'numeric'
                             }) : '-'}
+                          </td>
+
+                          {/* Recurrence */}
+                          <td className="px-4 py-4 text-center">
+                            {task.isRecurring && (
+                              <div className="flex justify-center" title={task.recurrenceInterval || "Recurring Task"}>
+                                <Repeat className="w-4 h-4 text-blue-500" />
+                              </div>
+                            )}
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {filteredTasks.length === 0 && (
-                  <div className="p-12 text-center">
-                    <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <Search className="w-8 h-8 text-slate-300" />
-                    </div>
-                    <h3 className="text-lg font-medium text-slate-900">No tasks found</h3>
-                    <p className="text-slate-500 mt-1">Try adjusting your filters or search query.</p>
-                  </div>
-                )}
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 text-xs text-slate-500 flex justify-between">
-                  <span>Showing {filteredTasks.length} tasks</span>
-                  {mode === 'mock' && <span>Mock Data Mode</span>}
-                </div>
               </div>
             </div>
           )}
 
-          {/* --- SETTINGS VIEW --- */}
+          {/* SETTINGS VIEW */}
           {activeTab === 'settings' && (
-            <div className="max-w-2xl mx-auto space-y-8 animate-in fade-in duration-500">
-              
-              <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
-                <div className="flex items-start gap-4">
-                  <div className="bg-blue-100 p-3 rounded-full">
-                    <Settings className="w-6 h-6 text-blue-600" />
-                  </div>
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-800">Connection Settings</h2>
-                    <p className="text-slate-500 mt-1">
-                      Choose between viewing sample data or connecting to your real Google Tasks account.
-                    </p>
-                  </div>
-                </div>
+             <div className="max-w-2xl mx-auto space-y-8 animate-in fade-in duration-500">
+             <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
+               <h2 className="text-xl font-bold text-slate-800 mb-6">Connection Settings</h2>
+               
+               <div className="space-y-4">
+                 <div className="flex gap-2 bg-slate-50 p-1 rounded-lg">
+                   <button onClick={() => setMode('mock')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'mock' ? 'bg-white shadow' : 'text-slate-500'}`}>Mock Mode</button>
+                   <button onClick={() => setMode('live')} className={`flex-1 py-2 text-sm font-medium rounded ${mode === 'live' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>Live API</button>
+                 </div>
 
-                <div className="mt-8 space-y-6">
-                  {/* Mode Toggle */}
-                  <div className="bg-slate-50 p-1 rounded-lg flex">
-                    <button
-                      onClick={() => setMode('mock')}
-                      className={`flex-1 py-2 px-4 text-sm font-medium rounded-md transition-all ${mode === 'mock' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                    >
-                      Mock Mode (Demo)
-                    </button>
-                    <button
-                      onClick={() => setMode('live')}
-                      className={`flex-1 py-2 px-4 text-sm font-medium rounded-md transition-all ${mode === 'live' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                    >
-                      Live API Mode
-                    </button>
-                  </div>
-
-                  {mode === 'mock' ? (
-                    <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-4 flex gap-3">
-                      <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                      <div>
-                        <h4 className="text-sm font-semibold text-emerald-800">Demo Mode Active</h4>
-                        <p className="text-sm text-emerald-700 mt-1">
-                          You are viewing generated sample data. This allows you to test the filtering, search, and export features without needing API credentials.
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="bg-amber-50 border border-amber-100 rounded-lg p-4 flex gap-3">
-                        <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                        <div className="text-sm text-amber-800">
-                          <strong>Important:</strong> To use Live Mode, you must have a Google Cloud Project with the <code>Tasks API</code> enabled.
-                          <br /><br />
-                          If you are running this in a sandbox/iframe, Google Auth may be blocked due to origin restrictions. Export this code to run locally if that happens.
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Client ID</label>
-                        <input 
-                          type="text" 
-                          value={clientId}
-                          onChange={(e) => setClientId(e.target.value)}
-                          placeholder="e.g., 123456789-abc.apps.googleusercontent.com"
-                          className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">API Key</label>
-                        <input 
-                          type="password" 
-                          value={apiKey}
-                          onChange={(e) => setApiKey(e.target.value)}
-                          placeholder="AIzaSy..."
-                          className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                      </div>
-
-                      <button 
-                        onClick={handleLiveConnect}
-                        disabled={!clientId || !apiKey || isLoading}
-                        className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-lg shadow-sm transition-all flex justify-center items-center space-x-2"
-                      >
-                        {isAuthenticated ? (
-                          <>
-                            <RefreshCw className="w-4 h-4" />
-                            <span>Refresh Data</span>
-                          </>
-                        ) : (
-                          <>
-                            <LogOut className="w-4 h-4" />
-                            <span>Authenticate & Fetch</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
+                 {mode === 'live' && (
+                   <>
+                     <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-800">
+                       <p className="font-semibold mb-1">Persistent History Active</p>
+                       <p>This app now saves your tasks to your browser. If a recurring task is completed and resets on Google, we will keep the completed record here in your history.</p>
+                     </div>
+                     <div>
+                       <label className="block text-sm font-medium mb-1">Client ID</label>
+                       <input type="text" value={clientId} onChange={(e) => setClientId(e.target.value)} className="w-full border rounded-lg px-3 py-2" />
+                     </div>
+                     <div>
+                       <label className="block text-sm font-medium mb-1">API Key</label>
+                       <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full border rounded-lg px-3 py-2" />
+                     </div>
+                     <button onClick={handleLiveConnect} className="w-full py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">
+                       {isAuthenticated ? 'Refresh Data' : 'Connect & Fetch'}
+                     </button>
+                   </>
+                 )}
+               </div>
+             </div>
+           </div>
           )}
 
         </div>
