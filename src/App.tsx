@@ -1,28 +1,25 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   CheckCircle2, 
   Search, 
   Calendar, 
+  BarChart3, 
   Settings, 
+  Download, 
+  RefreshCw, 
+  Filter, 
+  ChevronDown, 
+  ChevronUp,
   LayoutDashboard,
   ListTodo,
+  LogOut,
+  AlertTriangle,
   Loader2,
+  X,
   Repeat,
   Archive,
   Clock
 } from 'lucide-react';
-
-/**
- * --- TYPESCRIPT FIXES ---
- * We declare these global variables so TypeScript doesn't complain
- * that 'window.gapi' or 'window.google' do not exist.
- */
-declare global {
-  interface Window {
-    gapi: any;
-    google: any;
-  }
-}
 
 /**
  * --- APP CONFIGURATION & TYPES ---
@@ -141,7 +138,7 @@ const ActivityHeatmap = ({ tasks }: { tasks: GoogleTask[] }) => {
   return (
     <div className="w-full overflow-x-auto pb-2">
       <div className="flex space-x-1 min-w-[max-content]">
-        {days.map((day) => (
+        {days.map((day, i) => (
           <div 
             key={day.date}
             title={`${day.date}: ${day.count} tasks`}
