@@ -284,6 +284,13 @@ export default function GoogleTasksMonitor() {
         scope: 'https://www.googleapis.com/auth/tasks',
         callback: async (resp: any) => {
           if (resp.error) throw resp;
+          
+          // --- CRITICAL FIX: Explicitly set the token on the GAPI client ---
+          // Without this, the GAPI client doesn't know you are logged in.
+          if (window.gapi && window.gapi.client) {
+             window.gapi.client.setToken(resp);
+          }
+          
           await fetchRealData();
         },
       });
@@ -336,6 +343,13 @@ export default function GoogleTasksMonitor() {
   const fetchRealData = async () => {
     setLoadingText('Fetching Lists...');
     try {
+      // FIX: Ensure Client is actually ready
+      if (!window.gapi.client || !window.gapi.client.tasks) {
+        console.log("GAPI Client not ready, attempting re-init...");
+        await initClient();
+        if (!window.gapi.client.tasks) throw new Error("Google API Client failed to load 'tasks' service.");
+      }
+
       const listsResp = await window.gapi.client.tasks.tasklists.list();
       const lists = listsResp.result.items || [];
       setAllLists(lists);
@@ -412,8 +426,8 @@ export default function GoogleTasksMonitor() {
       setIsAuthenticated(true);
 
     } catch (err) {
-      console.error('Fetch Error', err);
-      alert('Failed to fetch. Check console.');
+      console.error('Fetch Error Detail:', err); // Helpful for debugging
+      alert('Failed to fetch. Check console for error details (Access Denied or Network Error).');
     } finally {
       setIsLoading(false);
     }
