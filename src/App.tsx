@@ -479,8 +479,8 @@ export default function GoogleTasksMonitor() {
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {isLoading && <LoadingOverlay />}
 
-      {/* SIDEBAR */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0 z-20">
+      {/* SIDEBAR - DESKTOP ONLY */}
+      <aside className="hidden md:flex w-64 bg-white border-r border-slate-200 flex-col shrink-0 z-20">
         <div className="p-6 flex items-center space-x-3 border-b border-slate-100">
           <div className="bg-blue-600 p-2 rounded-lg">
             <CheckCircle2 className="w-6 h-6 text-white" />
@@ -504,11 +504,36 @@ export default function GoogleTasksMonitor() {
         </nav>
       </aside>
 
+      {/* MOBILE BOTTOM NAV */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-30 pb-safe">
+        <button 
+          onClick={() => setActiveTab('dashboard')} 
+          className={`flex flex-col items-center p-2 rounded-lg transition-colors ${activeTab === 'dashboard' ? 'text-blue-600' : 'text-slate-500'}`}
+        >
+          <LayoutDashboard className="w-6 h-6" />
+          <span className="text-[10px] font-medium mt-1">Dashboard</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('history')} 
+          className={`flex flex-col items-center p-2 rounded-lg transition-colors ${activeTab === 'history' ? 'text-blue-600' : 'text-slate-500'}`}
+        >
+          <ListTodo className="w-6 h-6" />
+          <span className="text-[10px] font-medium mt-1">History</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('settings')} 
+          className={`flex flex-col items-center p-2 rounded-lg transition-colors ${activeTab === 'settings' ? 'text-blue-600' : 'text-slate-500'}`}
+        >
+          <Settings className="w-6 h-6" />
+          <span className="text-[10px] font-medium mt-1">Settings</span>
+        </button>
+      </nav>
+
       {/* MAIN CONTENT */}
-      <main className="flex-1 overflow-y-auto">
-        <header className="bg-white border-b border-slate-200 px-8 py-5 flex items-center justify-between sticky top-0 z-10">
+      <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
+        <header className="bg-white border-b border-slate-200 px-4 md:px-8 py-4 md:py-5 flex items-center justify-between sticky top-0 z-10">
           <div>
-            <h1 className="text-2xl font-bold text-slate-800">
+            <h1 className="text-xl md:text-2xl font-bold text-slate-800">
               {activeTab === 'dashboard' && 'Productivity Overview'}
               {activeTab === 'history' && 'Search History'}
               {activeTab === 'settings' && 'App Settings'}
@@ -516,12 +541,12 @@ export default function GoogleTasksMonitor() {
           </div>
         </header>
 
-        <div className="p-8">
+        <div className="p-4 md:p-8">
           
           {/* DASHBOARD */}
           {activeTab === 'dashboard' && (
             <div className="space-y-8 animate-in fade-in duration-500">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
                 <StatCard title="Total Stored" value={stats.total} icon={Archive} colorClass="bg-slate-500" />
                 <StatCard title="Completed (All Time)" value={stats.completedTotal} icon={CheckCircle2} colorClass="bg-green-500" />
                 <StatCard title="Completed (7 Days)" value={stats.completedWeek} icon={Calendar} colorClass="bg-blue-500" />
@@ -549,11 +574,11 @@ export default function GoogleTasksMonitor() {
                   />
                 </div>
                 <div className="flex gap-2">
-                  <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                  <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm flex-1 md:flex-none">
                     <option value="all">All Lists</option>
                     {allLists.map(l => <option key={l.id} value={l.id}>{l.title}</option>)}
                   </select>
-                  <select value={dateRange} onChange={(e) => setDateRange(e.target.value as any)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                  <select value={dateRange} onChange={(e) => setDateRange(e.target.value as any)} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm flex-1 md:flex-none">
                     <option value="all">All Time</option>
                     <option value="7days">Last 7 Days</option>
                     <option value="30days">Last 30 Days</option>
@@ -563,7 +588,7 @@ export default function GoogleTasksMonitor() {
 
               <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse table-fixed">
+                  <table className="w-full text-left border-collapse min-w-[800px] md:min-w-0 md:table-fixed">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500 font-semibold">
                         <th className="px-4 py-4 w-12 text-center">Status</th>
