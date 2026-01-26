@@ -12,7 +12,8 @@ import {
   Clock,
   ShieldAlert,
   Save,
-  CloudCog
+  CloudCog,
+  Download
 } from 'lucide-react';
 
 /**
@@ -433,6 +434,53 @@ export default function GoogleTasksMonitor() {
     }
   };
 
+  // --- EXPORT LOGIC ---
+  const handleTickTickExport = () => {
+    // Columns: Folder Name, List Name, Task Title, Is Check List, Start Date, Tags, Content, Priority, Due Date, Status, Repeat
+    const headers = [
+      'Folder Name', 'List Name', 'Task Title', 'Is Check List', 
+      'Start Date', 'Tags', 'Content', 'Priority', 'Due Date', 'Status', 'Repeat'
+    ];
+
+    const formatTickTickDate = (isoString?: string) => {
+      if (!isoString) return '';
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return '';
+      return d.toISOString().slice(0, 10); // YYYY-MM-DD
+    };
+
+    const csvRows = allTasks.map(task => {
+      // 0 = Not Completed, 1 = Completed
+      const status = task.status === 'completed' ? 1 : 0;
+      
+      // Attempt to map recurrence interval for mock data. Real API doesn't provide this easily.
+      let repeat = '';
+      if (task.recurrenceInterval === 'Weekly') repeat = '{"freq":"WEEKLY","interval":1}';
+      if (task.recurrenceInterval === 'Daily') repeat = '{"freq":"DAILY","interval":1}';
+
+      return [
+        '', // Folder Name (Empty)
+        `"${(task.listName || 'Inbox').replace(/"/g, '""')}"`, // List Name
+        `"${(task.title || '').replace(/"/g, '""')}"`, // Task Title
+        0, // Is Check List (Default 0)
+        '', // Start Date (Empty)
+        '', // Tags (Empty)
+        `"${(task.notes || '').replace(/"/g, '""')}"`, // Content
+        0, // Priority (Default None)
+        formatTickTickDate(task.due), // Due Date
+        status, // Status
+        `"${repeat.replace(/"/g, '""')}"` // Repeat
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...csvRows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `ticktick_export_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
+  };
+
   // --- FILTERING ---
   const filteredTasks = useMemo(() => {
     return allTasks.filter(task => {
@@ -583,6 +631,13 @@ export default function GoogleTasksMonitor() {
                     <option value="7days">Last 7 Days</option>
                     <option value="30days">Last 30 Days</option>
                   </select>
+                  <button 
+                    onClick={handleTickTickExport}
+                    className="flex items-center justify-center bg-white border border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-200 rounded-lg px-3 py-2 transition-colors"
+                    title="Export to TickTick CSV"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
 
